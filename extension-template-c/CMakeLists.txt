@@ -225,6 +225,11 @@ include_directories(
     duckdb_capi
 )
 
+include_directories(
+    src/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/duckdb_capi
+)
+
 if(LIGHTGBM_INCLUDE_DIR)
     include_directories(${LIGHTGBM_INCLUDE_DIR})
 endif()

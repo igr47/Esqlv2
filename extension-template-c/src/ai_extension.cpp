@@ -1,7 +1,7 @@
-#include "duckdb.hpp"
-#include "duckdb/main/extension_util.hpp"
-#include "duckdb/parser/parser_extension.hpp"
-#include "create_model_statement.hpp"
+#include "duckdb.h"
+#include "duckdb/main/extension_util.h"
+#include "duckdb/parser/parser_extension.h"
+#include "create_model_statement.h"
 #include "algorithm_registry.hpp"
 #include "model_registry.hpp"
 #include <filesystem>
