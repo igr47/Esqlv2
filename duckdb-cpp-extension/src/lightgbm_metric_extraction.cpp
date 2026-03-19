@@ -1,13 +1,13 @@
-#include "lightgbm_model.h"
+#include "include/esql/lightgbm_model.h"
+#include "LightGBM/c_api.h"
 #include <iostream>
 #include <sstream>
 #include <iomanip>
 #include <cmath>
 
 namespace esql {
-namespace ai {
 
-void AdaptiveLightGBMModel::extract_native_metrics(BoosterHandle booster, const ModelSchema& schema) {
+void AdaptiveLightGBMModel::ExtractNativeMetrics(BoosterHandle booster) {
     if (!booster) {
         std::cerr << "[LightGBM] Cannot extract metrics - booster is null" << std::endl;
         return;
@@ -118,7 +118,7 @@ void AdaptiveLightGBMModel::extract_native_metrics(BoosterHandle booster, const 
     }
 
     // Process metrics based on problem type
-    process_metrics_by_type(eval_names, eval_values);
+    ProcessMetricsByType(eval_names, eval_values);
 
     // Log metrics
     std::cout << "\n========== LightGBM Native Validation Metrics ==========" << std::endl;
@@ -131,7 +131,7 @@ void AdaptiveLightGBMModel::extract_native_metrics(BoosterHandle booster, const 
     std::cout << "========================================================\n" << std::endl;
 }
 
-void AdaptiveLightGBMModel::process_metrics_by_type(
+void AdaptiveLightGBMModel::ProcessMetricsByType(
     const std::vector<std::string>& eval_names,
     const std::vector<double>& eval_values) {
 
@@ -139,15 +139,15 @@ void AdaptiveLightGBMModel::process_metrics_by_type(
     schema_.accuracy = 0.0f;
 
     if (schema_.problem_type == "binary_classification") {
-        process_binary_metrics(eval_names, eval_values);
+        ProcessBinaryMetrics(eval_names, eval_values);
     }
     else if (schema_.problem_type == "multiclass") {
-        process_multiclass_metrics(eval_names, eval_values);
+        ProcessMulticlassMetrics(eval_names, eval_values);
     }
     else if (schema_.problem_type.find("regression") != std::string::npos ||
              schema_.problem_type == "count_regression" ||
              schema_.problem_type == "positive_regression") {
-        process_regression_metrics(eval_names, eval_values);
+        ProcessRegressionMetrics(eval_names, eval_values);
     }
     else {
         // Default fallback
@@ -159,7 +159,7 @@ void AdaptiveLightGBMModel::process_metrics_by_type(
     }
 }
 
-void AdaptiveLightGBMModel::process_binary_metrics(
+void AdaptiveLightGBMModel::ProcessBinaryMetrics(
     const std::vector<std::string>& eval_names,
     const std::vector<double>& eval_values) {
 
@@ -217,7 +217,7 @@ void AdaptiveLightGBMModel::process_binary_metrics(
     }
 }
 
-void AdaptiveLightGBMModel::process_multiclass_metrics(
+void AdaptiveLightGBMModel::ProcessMulticlassMetrics(
     const std::vector<std::string>& eval_names,
     const std::vector<double>& eval_values) {
 
@@ -253,7 +253,7 @@ void AdaptiveLightGBMModel::process_multiclass_metrics(
     }
 }
 
-void AdaptiveLightGBMModel::process_regression_metrics(
+void AdaptiveLightGBMModel::ProcessRegressionMetrics(
     const std::vector<std::string>& eval_names,
     const std::vector<double>& eval_values) {
 
@@ -303,7 +303,7 @@ void AdaptiveLightGBMModel::process_regression_metrics(
     if (r2 > 0.0f && r2 < 1.0f) {
         schema_.accuracy = r2;
     } else if (rmse > 0.0f) {
-        // Normalize RMSE to [0,1] range
+        // Normalize RMSE to [0,1] range - this is a rough approximation
         float max_rmse = 100.0f; // Configurable based on data scale
         schema_.accuracy = std::max(0.0f, std::min(1.0f, 1.0f - (rmse / max_rmse)));
     } else {
@@ -311,5 +311,4 @@ void AdaptiveLightGBMModel::process_regression_metrics(
     }
 }
 
-} // namespace ai
 } // namespace esql

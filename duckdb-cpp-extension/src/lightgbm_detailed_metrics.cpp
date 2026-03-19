@@ -1,15 +1,16 @@
-#include "lightgbm_model.h"
+#include "include/esql/lightgbm_model.h"
+#include "LightGBM/c_api.h"
 #include <iostream>
 #include <iomanip>
 #include <cmath>
 #include <algorithm>
 #include <numeric>
+#include <unordered_set>
 
 namespace esql {
-namespace ai {
 
-void AdaptiveLightGBMModel::calculate_detailed_validation_metrics(
-    const DataExtractor::TrainingData::SplitData& validation_data) {
+void AdaptiveLightGBMModel::CalculateDetailedValidationMetrics(
+    const TrainingData::SplitData& validation_data) {
 
     if (validation_data.features.empty() || !booster_) {
         std::cerr << "[LightGBM] Cannot calculate detailed metrics - no validation data" << std::endl;
@@ -19,20 +20,20 @@ void AdaptiveLightGBMModel::calculate_detailed_validation_metrics(
     std::cout << "\n========== Detailed Validation Metrics ==========" << std::endl;
 
     if (schema_.problem_type == "binary_classification") {
-        calculate_detailed_binary_metrics(validation_data);
+        CalculateDetailedBinaryMetrics(validation_data);
     }
     else if (schema_.problem_type == "multiclass") {
-        calculate_detailed_multiclass_metrics(validation_data);
+        CalculateDetailedMulticlassMetrics(validation_data);
     }
     else {
-        calculate_detailed_regression_metrics(validation_data);
+        CalculateDetailedRegressionMetrics(validation_data);
     }
 
     std::cout << "=================================================\n" << std::endl;
 }
 
-void AdaptiveLightGBMModel::calculate_detailed_binary_metrics(
-    const DataExtractor::TrainingData::SplitData& validation_data) {
+void AdaptiveLightGBMModel::CalculateDetailedBinaryMetrics(
+    const TrainingData::SplitData& validation_data) {
 
     size_t n = validation_data.features.size();
     size_t num_features = validation_data.features[0].size();
@@ -89,7 +90,7 @@ void AdaptiveLightGBMModel::calculate_detailed_binary_metrics(
     float specificity = (tn + fp > 0) ? static_cast<float>(tn) / (tn + fp) : 0.0f;
     float f1_score = (precision + recall > 0) ? 2.0f * (precision * recall) / (precision + recall) : 0.0f;
 
-    // Calculate AUC (simplified)
+    // Calculate AUC
     float auc = calculate_auc(predictions, validation_data.labels);
 
     // Store in metadata
@@ -122,8 +123,8 @@ void AdaptiveLightGBMModel::calculate_detailed_binary_metrics(
     std::cout << "    FN: " << fn << "  TN: " << tn << std::endl;
 }
 
-void AdaptiveLightGBMModel::calculate_detailed_multiclass_metrics(
-    const DataExtractor::TrainingData::SplitData& validation_data) {
+void AdaptiveLightGBMModel::CalculateDetailedMulticlassMetrics(
+    const TrainingData::SplitData& validation_data) {
 
     size_t n = validation_data.features.size();
     size_t num_features = validation_data.features[0].size();
@@ -287,8 +288,8 @@ void AdaptiveLightGBMModel::calculate_detailed_multiclass_metrics(
     }
 }
 
-void AdaptiveLightGBMModel::calculate_detailed_regression_metrics(
-    const DataExtractor::TrainingData::SplitData& validation_data) {
+void AdaptiveLightGBMModel::CalculateDetailedRegressionMetrics(
+    const TrainingData::SplitData& validation_data) {
 
     size_t n = validation_data.features.size();
     size_t num_features = validation_data.features[0].size();
@@ -544,5 +545,4 @@ float AdaptiveLightGBMModel::calculate_auc(
     return auc;
 }
 
-} // namespace ai
 } // namespace esql

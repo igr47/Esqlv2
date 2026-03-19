@@ -1,13 +1,15 @@
-#include "lightgbm_model.h"
+#include "include/esql/lightgbm_model.h"
+#include "LightGBM/c_api.h"
 #include <iostream>
 #include <cmath>
 #include <algorithm>
 #include <map>
 #include <unordered_map>
 #include <iomanip>
+#include <random>
+#include <numeric>
 
 namespace esql {
-namespace ai {
 
 void AdaptiveLightGBMModel::calculate_training_metrics(
     const std::vector<std::vector<float>>& features,
@@ -56,10 +58,8 @@ void AdaptiveLightGBMModel::calculate_training_metrics(
             LGBM_BoosterGetEvalNames(booster_, num_metrics, &actual_num,
                                      MAX_NAME * num_metrics, &actual_written, name_ptrs.data());
 
-            std::vector<std::string> train_names;
             for (int i = 0; i < actual_num && i < out_len; ++i) {
                 if (name_ptrs[i]) {
-                    train_names.push_back(name_ptrs[i]);
                     schema_.metadata["train_" + std::string(name_ptrs[i])] =
                         std::to_string(train_results[i]);
                 }
@@ -133,7 +133,7 @@ void AdaptiveLightGBMModel::calculate_binary_training_metrics(
         static_cast<int32_t>(val_size),
         static_cast<int32_t>(num_features),
         1,
-        0,
+        0,  // normal prediction (returns probability for binary)
         0,
         -1,
         "",
@@ -255,7 +255,7 @@ void AdaptiveLightGBMModel::calculate_multiclass_training_metrics(
         static_cast<int32_t>(val_size),
         static_cast<int32_t>(num_features),
         1,
-        1,  // predict raw score for probabilities
+        1,  // predict raw score (returns probabilities)
         0,
         -1,
         "",
@@ -488,8 +488,60 @@ void AdaptiveLightGBMModel::calculate_poisson_training_metrics(
 
     // Add Poisson-specific metrics
     float poisson_deviance = 0.0f;
-    for (size_t i = 0; i < labels.size(); ++i) {
-        // Poisson deviance calculation
+    size_t count = 0;
+
+    if (!booster_ || features.empty()) {
+        schema_.metadata["poisson_deviance"] = "0.0";
+        return;
+    }
+
+    size_t total_samples = features.size();
+    size_t val_size = std::min(total_samples / 5, (size_t)1000);
+    if (val_size < 10) val_size = std::min(total_samples, (size_t)100);
+    size_t start_idx = total_samples - val_size;
+    size_t num_features = features[0].size();
+
+    // Prepare features
+    std::vector<float> flat_features;
+    flat_features.reserve(val_size * num_features);
+    for (size_t i = start_idx; i < total_samples; ++i) {
+        flat_features.insert(flat_features.end(),
+                           features[i].begin(),
+                           features[i].end());
+    }
+
+    // Make predictions
+    std::vector<double> predictions(val_size);
+    int64_t out_len = 0;
+
+    int result = LGBM_BoosterPredictForMat(
+        booster_,
+        flat_features.data(),
+        C_API_DTYPE_FLOAT32,
+        static_cast<int32_t>(val_size),
+        static_cast<int32_t>(num_features),
+        1,
+        0,
+        0,
+        -1,
+        "",
+        &out_len,
+        predictions.data()
+    );
+
+    if (result == 0 && static_cast<size_t>(out_len) == val_size) {
+        for (size_t i = 0; i < val_size; ++i) {
+            float true_val = labels[start_idx + i];
+            float pred_val = static_cast<float>(predictions[i]);
+            // Poisson deviance: 2 * (true * log(true/pred) - (true - pred))
+            if (true_val > 0 && pred_val > 0) {
+                poisson_deviance += 2.0f * (true_val * std::log(true_val / pred_val) - (true_val - pred_val));
+                count++;
+            }
+        }
+        if (count > 0) {
+            poisson_deviance /= count;
+        }
     }
 
     schema_.metadata["poisson_deviance"] = std::to_string(poisson_deviance);
@@ -510,6 +562,7 @@ void AdaptiveLightGBMModel::calculate_quantile_training_metrics(
 
     size_t total_samples = features.size();
     size_t val_size = std::min(total_samples / 5, (size_t)1000);
+    if (val_size < 10) val_size = std::min(total_samples, (size_t)100);
     size_t start_idx = total_samples - val_size;
     size_t num_features = features[0].size();
 
@@ -525,7 +578,7 @@ void AdaptiveLightGBMModel::calculate_quantile_training_metrics(
     std::vector<double> predictions(val_size);
     int64_t out_len = 0;
 
-    LGBM_BoosterPredictForMat(
+    int result = LGBM_BoosterPredictForMat(
         booster_,
         flat_features.data(),
         C_API_DTYPE_FLOAT32,
@@ -539,6 +592,11 @@ void AdaptiveLightGBMModel::calculate_quantile_training_metrics(
         &out_len,
         predictions.data()
     );
+
+    if (result != 0 || static_cast<size_t>(out_len) != val_size) {
+        std::cerr << "[LightGBM] Failed to make predictions for quantile metrics" << std::endl;
+        return;
+    }
 
     // Calculate pinball loss
     float pinball_loss = 0.0f;
@@ -606,7 +664,61 @@ void AdaptiveLightGBMModel::calculate_gamma_training_metrics(
 
     // Gamma deviance
     float gamma_deviance = 0.0f;
-    // Calculate gamma deviance...
+    size_t count = 0;
+
+    if (!booster_ || features.empty()) {
+        schema_.metadata["gamma_deviance"] = "0.0";
+        return;
+    }
+
+    size_t total_samples = features.size();
+    size_t val_size = std::min(total_samples / 5, (size_t)1000);
+    if (val_size < 10) val_size = std::min(total_samples, (size_t)100);
+    size_t start_idx = total_samples - val_size;
+    size_t num_features = features[0].size();
+
+    // Prepare features
+    std::vector<float> flat_features;
+    flat_features.reserve(val_size * num_features);
+    for (size_t i = start_idx; i < total_samples; ++i) {
+        flat_features.insert(flat_features.end(),
+                           features[i].begin(),
+                           features[i].end());
+    }
+
+    // Make predictions
+    std::vector<double> predictions(val_size);
+    int64_t out_len = 0;
+
+    int result = LGBM_BoosterPredictForMat(
+        booster_,
+        flat_features.data(),
+        C_API_DTYPE_FLOAT32,
+        static_cast<int32_t>(val_size),
+        static_cast<int32_t>(num_features),
+        1,
+        0,
+        0,
+        -1,
+        "",
+        &out_len,
+        predictions.data()
+    );
+
+    if (result == 0 && static_cast<size_t>(out_len) == val_size) {
+        for (size_t i = 0; i < val_size; ++i) {
+            float true_val = labels[start_idx + i];
+            float pred_val = static_cast<float>(predictions[i]);
+            // Gamma deviance: 2 * (log(pred/true) + true/pred - 1)
+            if (true_val > 0 && pred_val > 0) {
+                gamma_deviance += 2.0f * (std::log(pred_val / true_val) + true_val / pred_val - 1.0f);
+                count++;
+            }
+        }
+        if (count > 0) {
+            gamma_deviance /= count;
+        }
+    }
 
     schema_.metadata["gamma_deviance"] = std::to_string(gamma_deviance);
 }
@@ -614,6 +726,8 @@ void AdaptiveLightGBMModel::calculate_gamma_training_metrics(
 void AdaptiveLightGBMModel::calculate_fallback_metrics(
     const std::vector<std::vector<float>>& features,
     const std::vector<float>& labels) {
+
+    (void)features; // Suppress unused parameter warning
 
     if (schema_.problem_type == "binary_classification") {
         schema_.accuracy = 0.85f;
@@ -629,5 +743,4 @@ void AdaptiveLightGBMModel::calculate_fallback_metrics(
     }
 }
 
-} // namespace ai
 } // namespace esql
