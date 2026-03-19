@@ -4,7 +4,6 @@
 
 //#include "lightgbm_duckdb_compat.h"
 //#include "duckdb.hpp"
-//#define LGB_NO_ARROW
 //#include "LightGBM/c_api.h"
 #include <unordered_map>
 #include <vector>
