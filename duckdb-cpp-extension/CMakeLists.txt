@@ -340,6 +340,7 @@ set(EXTENSION_SOURCES
     src/lightgbm_train_splits.cpp
     src/lightgbm_detailed_metrics.cpp
     src/lightgbm_metric_extraction.cpp
+    src/lightgbm_training_metrics.cpp
 )
 
 # ============================================================================
@@ -423,7 +424,8 @@ target_link_libraries(${EXTENSION_NAME} PRIVATE m)
 # Compiler Options
 # ============================================================================
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    target_compile_options(${EXTENSION_NAME} PRIVATE -O3 -march=native -flto)
+    #target_compile_options(${EXTENSION_NAME} PRIVATE -O3 -march=native -flto)
+    target_compile_options(${EXTENSION_NAME} PRIVATE -O3 -march=native)
 elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(${EXTENSION_NAME} PRIVATE -g -O0 -DDEBUG)
 endif()

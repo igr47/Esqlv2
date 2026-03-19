@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <random>
 #include <numeric>
+#include <unordered_set>
 
 namespace esql {
 
@@ -19,7 +20,7 @@ void AdaptiveLightGBMModel::calculate_training_metrics(
 
     if (!booster_) {
         std::cerr << "[LightGBM] WARNING: Booster not available, using fallback metrics" << std::endl;
-        calculate_fallback_metrics(features, labels);
+        CalculateFallbackMetrics(features, labels);
         return;
     }
 
@@ -29,7 +30,7 @@ void AdaptiveLightGBMModel::calculate_training_metrics(
 
     if (result != 0 || eval_count <= 0) {
         std::cerr << "[LightGBM] WARNING: No evaluation metrics available" << std::endl;
-        calculate_fallback_metrics(features, labels);
+        CalculateFallbackMetrics(features, labels);
         return;
     }
 
@@ -69,37 +70,37 @@ void AdaptiveLightGBMModel::calculate_training_metrics(
 
     // Now calculate metrics based on problem type
     if (schema_.problem_type == "binary_classification") {
-        calculate_binary_training_metrics(features, labels);
+        CalculateBinaryTrainingMetrics(features, labels);
     }
     else if (schema_.problem_type == "multiclass") {
-        calculate_multiclass_training_metrics(features, labels);
+        CalculateMulticlassTrainingMetrics(features, labels);
     }
     else if (schema_.problem_type == "count_regression" ||
              schema_.problem_type == "poisson") {
-        calculate_poisson_training_metrics(features, labels);
+        CalculatePoissonTrainingMetrics(features, labels);
     }
     else if (schema_.problem_type == "quantile_regression" ||
              schema_.algorithm == "QUANTILE") {
-        calculate_quantile_training_metrics(features, labels);
+        CalculateQuantileTrainingMetrics(features, labels);
     }
     else if (schema_.algorithm == "HUBER") {
-        calculate_huber_training_metrics(features, labels);
+        CalculateHuberTrainingMetrics(features, labels);
     }
     else if (schema_.algorithm == "TWEEDIE") {
-        calculate_tweedie_training_metrics(features, labels);
+        CalculateTweedieTrainingMetrics(features, labels);
     }
     else if (schema_.algorithm == "GAMMA") {
-        calculate_gamma_training_metrics(features, labels);
+        CalculateGammaTrainingMetrics(features, labels);
     }
     else {
         // Default regression
-        calculate_regression_training_metrics(features, labels);
+        CalculateRegressionTrainingMetrics(features, labels);
     }
 
     std::cout << "==================================================\n" << std::endl;
 }
 
-void AdaptiveLightGBMModel::calculate_binary_training_metrics(
+void AdaptiveLightGBMModel::CalculateBinaryTrainingMetrics(
     const std::vector<std::vector<float>>& features,
     const std::vector<float>& labels) {
 
@@ -203,7 +204,7 @@ void AdaptiveLightGBMModel::calculate_binary_training_metrics(
     std::cout << "  Log Loss:  " << logloss << std::endl;
 }
 
-void AdaptiveLightGBMModel::calculate_multiclass_training_metrics(
+void AdaptiveLightGBMModel::CalculateMulticlassTrainingMetrics(
     const std::vector<std::vector<float>>& features,
     const std::vector<float>& labels) {
 
@@ -374,7 +375,7 @@ void AdaptiveLightGBMModel::calculate_multiclass_training_metrics(
     std::cout << "  Log Loss:        " << logloss << std::endl;
 }
 
-void AdaptiveLightGBMModel::calculate_regression_training_metrics(
+void AdaptiveLightGBMModel::CalculateRegressionTrainingMetrics(
     const std::vector<std::vector<float>>& features,
     const std::vector<float>& labels) {
 
@@ -480,11 +481,11 @@ void AdaptiveLightGBMModel::calculate_regression_training_metrics(
     std::cout << "  MAE:   " << mae << std::endl;
 }
 
-void AdaptiveLightGBMModel::calculate_poisson_training_metrics(
+void AdaptiveLightGBMModel::CalculatePoissonTrainingMetrics(
     const std::vector<std::vector<float>>& features,
     const std::vector<float>& labels) {
 
-    calculate_regression_training_metrics(features, labels);
+    CalculateRegressionTrainingMetrics(features, labels);
 
     // Add Poisson-specific metrics
     float poisson_deviance = 0.0f;
@@ -547,7 +548,7 @@ void AdaptiveLightGBMModel::calculate_poisson_training_metrics(
     schema_.metadata["poisson_deviance"] = std::to_string(poisson_deviance);
 }
 
-void AdaptiveLightGBMModel::calculate_quantile_training_metrics(
+void AdaptiveLightGBMModel::CalculateQuantileTrainingMetrics(
     const std::vector<std::vector<float>>& features,
     const std::vector<float>& labels) {
 
@@ -621,11 +622,11 @@ void AdaptiveLightGBMModel::calculate_quantile_training_metrics(
     std::cout << "  Pinball Loss: " << pinball_loss << std::endl;
 }
 
-void AdaptiveLightGBMModel::calculate_huber_training_metrics(
+void AdaptiveLightGBMModel::CalculateHuberTrainingMetrics(
     const std::vector<std::vector<float>>& features,
     const std::vector<float>& labels) {
 
-    calculate_regression_training_metrics(features, labels);
+    CalculateRegressionTrainingMetrics(features, labels);
 
     // Huber-specific metrics
     float delta = 1.0f; // Default
@@ -639,11 +640,11 @@ void AdaptiveLightGBMModel::calculate_huber_training_metrics(
     schema_.metadata["huber_delta"] = std::to_string(delta);
 }
 
-void AdaptiveLightGBMModel::calculate_tweedie_training_metrics(
+void AdaptiveLightGBMModel::CalculateTweedieTrainingMetrics(
     const std::vector<std::vector<float>>& features,
     const std::vector<float>& labels) {
 
-    calculate_regression_training_metrics(features, labels);
+    CalculateRegressionTrainingMetrics(features, labels);
 
     float tweedie_power = 1.5f;
     auto it = schema_.metadata.find("tweedie_variance_power");
@@ -656,11 +657,11 @@ void AdaptiveLightGBMModel::calculate_tweedie_training_metrics(
     schema_.metadata["tweedie_power"] = std::to_string(tweedie_power);
 }
 
-void AdaptiveLightGBMModel::calculate_gamma_training_metrics(
+void AdaptiveLightGBMModel::CalculateGammaTrainingMetrics(
     const std::vector<std::vector<float>>& features,
     const std::vector<float>& labels) {
 
-    calculate_regression_training_metrics(features, labels);
+    CalculateRegressionTrainingMetrics(features, labels);
 
     // Gamma deviance
     float gamma_deviance = 0.0f;
@@ -723,7 +724,7 @@ void AdaptiveLightGBMModel::calculate_gamma_training_metrics(
     schema_.metadata["gamma_deviance"] = std::to_string(gamma_deviance);
 }
 
-void AdaptiveLightGBMModel::calculate_fallback_metrics(
+void AdaptiveLightGBMModel::CalculateFallbackMetrics(
     const std::vector<std::vector<float>>& features,
     const std::vector<float>& labels) {
 

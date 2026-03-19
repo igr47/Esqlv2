@@ -295,6 +295,7 @@ private:
     void CalculateFallbackMetrics(const std::vector<std::vector<float>>& features,
                                  const std::vector<float>& labels);
 	float calculate_auc(const std::vector<double>& predictions,const std::vector<float>& labels);
+	void calculate_training_metrics(const std::vector<std::vector<float>>& features,const std::vector<float>& labels);
 
     // Utility
     float CalculateAUC(const std::vector<double>& predictions,
