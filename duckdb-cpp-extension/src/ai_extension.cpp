@@ -241,7 +241,21 @@ void RegisterSyntaxMacros(ClientContext &context) {
 
 } // namespace duckdb
 
+
 extern "C" {
+
+// The macro should generate ai_extension_init
+DUCKDB_EXTENSION_API void ai_extension_init(duckdb::ExtensionLoader &loader) {
+    duckdb::AIExtension extension;
+    extension.Load(loader);
+}
+
+DUCKDB_EXTENSION_API const char *ai_extension_version() {
+    return "0.1.0";
+}
+
+} // extern "C"
+/*extern "C" {
 
 // Use the C++ extension entry point macro (as in quack_extension.cpp)
 DUCKDB_CPP_EXTENSION_ENTRY(ai_extension, loader) {
@@ -253,4 +267,4 @@ DUCKDB_EXTENSION_API const char *ai_extension_version() {
     return "0.1.0";
 }
 
-} // extern "C"
+}*/ // extern "C"
