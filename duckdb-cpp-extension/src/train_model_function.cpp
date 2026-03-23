@@ -1072,7 +1072,7 @@ static void TrainModelFunction(ClientContext &context,
     data.completed = true;
 }
 
-void RegisterTrainModelFunction(DatabaseInstance &db) {
+void CreateModelStatement::RegisterTrainModelFunction(DatabaseInstance &db) {
     TableFunction train_model("train_model",
         {
             LogicalType::VARCHAR,

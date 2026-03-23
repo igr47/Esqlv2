@@ -104,6 +104,7 @@ namespace duckdb {
 			unique_ptr<ParserExtensionParseData> Copy() const override {
 				return make_uniq<CreateModelStatement>(*this);
 			}
+			void RegisterTrainModelFunction(DatabaseInstance &db);
             //std::unique_ptr<SQLStatement> copy() const;
 
             // Helper methods

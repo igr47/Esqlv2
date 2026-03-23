@@ -8,6 +8,8 @@
 #include <chrono>
 #include <fstream>
 #include <optional>
+#include <atomic>
+#include <mutex>
 
 namespace duckdb {
 
@@ -92,6 +94,14 @@ private:
 
     std::string models_directory_ = "models";
     std::shared_mutex dir_mutex_;   // protects models_directory_
+	std::atomic<bool> initialized_{false};
+	std::mutex init_mutex_;
+
+	// Initialize the reistry table( lazy initialization)
+	static void InitializeTable(ClientContext &context);
+
+	// Check if table exists and create if needed
+    static void EnsureInitialized(ClientContext &context);
 
 public:
     // All methods now require a ClientContext

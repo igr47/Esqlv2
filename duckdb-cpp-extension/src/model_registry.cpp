@@ -149,8 +149,114 @@ static Value ToValue(const std::chrono::system_clock::time_point &tp) {
 // ModelRegistry implementation (all methods now require ClientContext)
 // ============================================================================
 
+static bool TableExists(ClientContext &context, const std::string &table_name) {
+	auto &db = DatabaseInstance::GetDatabase(context);
+	Connection conn(db);
+
+	auto prepared = conn.Prepare("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?");
+
+	if (prepared->HasError()) {
+		return false;
+	}
+
+	vector<Value> values = {Value(table_name)};
+	auto result = prepared->Execute(values);
+
+	if (result->HasError()) {
+		return false;
+	}
+
+	auto &materialized = dynamic_cast<MaterializedQueryResult &>(*result);
+	return materialized.GetValue(0,0).GetValue<int64_t>() > 0;
+}
+
+/*static bool TableExists(ClientContext &context, const string &table_name) {
+    Connection conn(DatabaseInstance::GetDatabase(context));
+    auto result = conn.Query("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+                              {Value(table_name)});
+    if (result->HasError()) return false;
+
+    auto &materialized = dynamic_cast<MaterializedQueryResult &>(*result);
+    return materialized.GetValue(0, 0).GetValue<int64_t>() > 0;
+}*/
+
+// Initialize the model registry table
+void ModelRegistry::InitializeTable(ClientContext &context) {
+    Connection conn(DatabaseInstance::GetDatabase(context));
+
+    // Create the model registry table if it doesn't exist
+    string create_sql = R"(
+        CREATE TABLE IF NOT EXISTS __model_registry (
+            model_name VARCHAR PRIMARY KEY,
+            algorithm VARCHAR,
+            problem_type VARCHAR,
+            features VARCHAR[],
+            target_column VARCHAR,
+            parameters MAP(VARCHAR, VARCHAR),
+            created_at TIMESTAMP,
+            training_samples UBIGINT,
+            accuracy FLOAT,
+            model_path VARCHAR,
+            is_active BOOLEAN
+        )
+    )";
+
+    // Use Query directly without QueryParameters
+    auto result = conn.Query(create_sql);
+    if (result->HasError()) {
+        throw std::runtime_error("Failed to create model registry table: " + result->GetError());
+    }
+}
+/*void ModelRegistry::InitializeTable(ClientContext &context) {
+    Connection conn(DatabaseInstance::GetDatabase(context));
+
+    // Create the model registry table if it doesn't exist
+    string create_sql = R"(
+        CREATE TABLE IF NOT EXISTS __model_registry (
+            model_name VARCHAR PRIMARY KEY,
+            algorithm VARCHAR,
+            problem_type VARCHAR,
+            features VARCHAR[],
+            target_column VARCHAR,
+            parameters MAP(VARCHAR, VARCHAR),
+            created_at TIMESTAMP,
+            training_samples UBIGINT,
+            accuracy FLOAT,
+            model_path VARCHAR,
+            is_active BOOLEAN
+        )
+    )";
+
+    auto result = conn.Query(create_sql, QueryParameters());
+    if (result->HasError()) {
+        throw std::runtime_error("Failed to create model registry table: " + result->GetError());
+    }
+}*/
+
+// Ensure the registry table is initialized before any operation
+void ModelRegistry::EnsureInitialized(ClientContext &context) {
+    auto &instance = GetInstance();
+
+    // Double-checked locking pattern
+    if (!instance.initialized_.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> lock(instance.init_mutex_);
+        if (!instance.initialized_.load(std::memory_order_relaxed)) {
+            try {
+                InitializeTable(context);
+                instance.initialized_.store(true, std::memory_order_release);
+            } catch (const std::exception &e) {
+                // Log error but don't throw - maybe table already exists
+                // We'll try to use it anyway
+                instance.initialized_.store(true, std::memory_order_release);
+            }
+        }
+    }
+}
+
+
 bool ModelRegistry::RegisterModel(ClientContext &context, const string &name,
                                    const ModelMetadata &metadata) {
+	EnsureInitialized(context);
     auto &db = DatabaseInstance::GetDatabase(context);
     Connection conn(db);
 
@@ -167,8 +273,7 @@ bool ModelRegistry::RegisterModel(ClientContext &context, const string &name,
     auto active_val    = Value::BOOLEAN(metadata.is_active);
 
     // Prepare the statement
-    auto prepared = conn.Prepare(
-        "INSERT OR REPLACE INTO __model_registry VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    auto prepared = conn.Prepare("INSERT OR REPLACE INTO __model_registry VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
 
     if (prepared->HasError()) {
         return false;
@@ -187,6 +292,7 @@ bool ModelRegistry::RegisterModel(ClientContext &context, const string &name,
 
 bool ModelRegistry::UpdateModel(ClientContext &context, const string &name,
                                  const ModelMetadata &metadata) {
+
     // Same as RegisterModel – INSERT OR REPLACE does the job
     return RegisterModel(context, name, metadata);
 }
@@ -256,6 +362,7 @@ bool ModelRegistry::UpdateModel(ClientContext &context, const string &name,
 }*/
 
 std::optional<ModelMetadata> ModelRegistry::GetModel(ClientContext &context, const string &name) {
+	EnsureInitialized(context);
     auto &db = DatabaseInstance::GetDatabase(context);
     Connection conn(db);
 
@@ -325,6 +432,7 @@ std::optional<ModelMetadata> ModelRegistry::GetModel(ClientContext &context, con
 }
 
 bool ModelRegistry::ModelExists(ClientContext &context, const string &name) {
+	EnsureInitialized(context);
     auto &db = DatabaseInstance::GetDatabase(context);
     Connection conn(db);
 
@@ -341,6 +449,7 @@ bool ModelRegistry::ModelExists(ClientContext &context, const string &name) {
 }
 
 bool ModelRegistry::DeleteModel(ClientContext &context, const string &name) {
+	EnsureInitialized(context);
     auto &db = DatabaseInstance::GetDatabase(context);
     Connection conn(db);
 
@@ -376,6 +485,7 @@ bool ModelRegistry::DeleteModel(ClientContext &context, const string &name) {
 }*/
 
 vector<string> ModelRegistry::ListModels(ClientContext &context) {
+	EnsureInitialized(context);
     auto &db = DatabaseInstance::GetDatabase(context);
     Connection conn(db);
 
@@ -403,6 +513,7 @@ vector<string> ModelRegistry::ListModels(ClientContext &context) {
 }*/
 
 vector<ModelMetadata> ModelRegistry::ListModelsDetailed(ClientContext &context) {
+	EnsureInitialized(context);
     auto &db = DatabaseInstance::GetDatabase(context);
     Connection conn(db);
 
@@ -427,7 +538,7 @@ vector<ModelMetadata> ModelRegistry::ListModelsDetailed(ClientContext &context) 
 
         metadata.target_column  = materialized.GetValue(4, i).GetValue<string>();
 
- auto map_val = materialized.GetValue(5, i);
+ 		auto map_val = materialized.GetValue(5, i);
         auto &map_children = StructValue::GetChildren(map_val);
         auto &keys = ListValue::GetChildren(map_children[0]);
         auto &values_vec = ListValue::GetChildren(map_children[1]);
