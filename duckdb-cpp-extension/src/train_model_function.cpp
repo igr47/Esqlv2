@@ -31,8 +31,21 @@ inline string ToUpper(const string &s) {
 // ============================================
 
 // Extract all columns from a table
+/*vector<string> GetAllColumns(ClientContext &context, const string &table_name) {
+    auto &db = DatabaseInstance::GetDatabase(context);
+    Connection conn(db);
+
+    auto result = conn.Query("SELECT * FROM " + table_name + " LIMIT 0");
+    vector<string> columns;
+    for (idx_t i = 0; i < result->ColumnCount(); i++) {
+        columns.push_back(result->GetColumnName(i));
+    }
+    return columns;
+}*/
 vector<string> GetAllColumns(ClientContext &context, const string &table_name) {
-    auto result = context.Query("SELECT * FROM " + table_name + " LIMIT 0", QueryParameters());
+    auto &db = DatabaseInstance::GetDatabase(context);
+    Connection conn(db);
+    auto result = conn.Query("SELECT * FROM " + table_name + " LIMIT 0");
     vector<string> columns;
     for (idx_t i = 0; i < result->types.size(); i++) {
         columns.push_back(result->names[i]);
@@ -92,11 +105,14 @@ std::string DetectProblemType(const std::vector<float> &labels) {
 }
 
 // Extract training data from source table
-esql::TrainingData ExtractTrainingData(ClientContext &context,
+/*esql::TrainingData ExtractTrainingData(ClientContext &context,
                                        const string &table_name,
                                        const vector<string> &feature_cols,
                                        const string &target_col,
                                        const string &where_clause) {
+
+    std::cout << "DEBUG: ExtractTrainingData started" << std::endl;
+    std::cout << "DEBUG: table_name = " << table_name << std::endl;
 
     esql::TrainingData result;
     result.feature_names = feature_cols;
@@ -114,34 +130,54 @@ esql::TrainingData ExtractTrainingData(ClientContext &context,
         query += " WHERE " + where_clause;
     }
 
-    // Execute query
-    auto query_result = context.Query(query, QueryParameters());
+    std::cout << "DEBUG: Executing query: " << query << std::endl;
+
+    // CRITICAL FIX: Create a new connection to avoid recursion deadlock
+    // Get the database from the context and create a new connection
+    auto &db = DatabaseInstance::GetDatabase(context);
+    Connection conn(db);
+
+    // Execute query on the new connection
+    auto query_result = conn.Query(query);
+
     if (!query_result || query_result->HasError()) {
-        throw std::runtime_error("Failed to execute query: " + (query_result ? query_result->GetError() : "unknown error"));
+        throw std::runtime_error("Failed to execute query: " +
+                                 (query_result ? query_result->GetError() : "unknown error"));
     }
 
     // For DuckDB's MaterializedQueryResult, we need to use different methods
     auto &materialized_result = dynamic_cast<MaterializedQueryResult&>(*query_result);
+    std::cout << "DEBUG: Query returned " << materialized_result.RowCount() << " rows" << std::endl;
+    std::cout << "DEBUG: Column count = " << materialized_result.ColumnCount() << std::endl;
     result.total_samples = materialized_result.RowCount();
 
-	    // Get column indices
+    // Get column indices
     std::unordered_map<string, idx_t> column_indices;
-    for (idx_t i = 0; i < materialized_result.ColumnCount(); i++) {
+for (idx_t i = 0; i < materialized_result.ColumnCount(); i++) {
         column_indices[materialized_result.names[i]] = i;
     }
 
     // Get target column index
-    idx_t target_idx = column_indices[target_col];
+    auto target_it = column_indices.find(target_col);
+    if (target_it == column_indices.end()) {
+        throw std::runtime_error("Target column '" + target_col + "' not found in result");
+    }
+    idx_t target_idx = target_it->second;
 
     // Get feature column indices
     vector<idx_t> feature_indices;
     for (const auto &col : feature_cols) {
-        feature_indices.push_back(column_indices[col]);
+        auto it = column_indices.find(col);
+        if (it == column_indices.end()) {
+            throw std::runtime_error("Feature column '" + col + "' not found in result");
+        }
+        feature_indices.push_back(it->second);
     }
 
-    // Extract data - using MaterializedQueryResult methods
-	for (idx_t row_idx = 0; row_idx < materialized_result.RowCount(); row_idx++) {
+    // Extract data
+    for (idx_t row_idx = 0; row_idx < materialized_result.RowCount(); row_idx++) {
         vector<float> feature_row;
+        feature_row.reserve(feature_indices.size());
 
         for (idx_t feature_idx : feature_indices) {
             auto val = materialized_result.GetValue(row_idx, feature_idx);
@@ -156,16 +192,230 @@ esql::TrainingData ExtractTrainingData(ClientContext &context,
         if (!label_val.IsNull()) {
             float label = ValueToFloat(label_val);
             result.labels.push_back(label);
-            result.features.push_back(feature_row);
+            result.features.push_back(std::move(feature_row));
             result.valid_samples++;
         }
     }
-    /*for (idx_t row_idx = 0; row_idx < materialized_result.RowCount(); row_idx++) {
-        vector<float> feature_row;
-        bool row_valid = true;
 
-        for (const auto &col : feature_cols) {
-            auto val = materialized_result.GetValue(row_idx, col);
+    std::cout << "DEBUG: Extracted " << result.valid_samples << " valid samples" << std::endl;
+    return result;
+}*/
+
+// Extract training data from source table
+esql::TrainingData ExtractTrainingData(ClientContext &context,
+                                       const string &table_name,
+                                       const vector<string> &feature_cols,
+                                       const string &target_col,
+                                       const string &where_clause) {
+
+    std::cout << "DEBUG: ExtractTrainingData started" << std::endl;
+    std::cout << "DEBUG: table_name = " << table_name << std::endl;
+
+    esql::TrainingData result;
+    result.feature_names = feature_cols;
+    result.label_name = target_col;
+
+    // Build query
+    string query = "SELECT ";
+    for (size_t i = 0; i < feature_cols.size(); i++) {
+        if (i > 0) query += ", ";
+        query += feature_cols[i];
+    }
+    query += ", " + target_col + " FROM " + table_name;
+
+    if (!where_clause.empty()) {
+        query += " WHERE " + where_clause;
+    }
+
+    std::cout << "DEBUG: Executing query: " << query << std::endl;
+
+    auto &db = DatabaseInstance::GetDatabase(context);
+    Connection conn(db);
+    auto query_result = conn.Query(query);
+
+    if (!query_result || query_result->HasError()) {
+        throw std::runtime_error("Failed to execute query: " +
+                                 (query_result ? query_result->GetError() : "unknown error"));
+    }
+
+    auto &materialized_result = dynamic_cast<MaterializedQueryResult&>(*query_result);
+    std::cout << "DEBUG: Query returned " << materialized_result.RowCount() << " rows" << std::endl;
+    std::cout << "DEBUG: Column count = " << materialized_result.ColumnCount() << std::endl;
+    result.total_samples = materialized_result.RowCount();
+
+    // Get column indices
+    std::unordered_map<string, idx_t> column_indices;
+    for (idx_t i = 0; i < materialized_result.ColumnCount(); i++) {
+        column_indices[materialized_result.names[i]] = i;
+    }
+
+    // Get target index
+    auto target_it = column_indices.find(target_col);
+    if (target_it == column_indices.end()) {
+        throw std::runtime_error("Target column '" + target_col + "' not found in result");
+    }
+    idx_t target_idx = target_it->second;
+
+    // Get feature indices
+    vector<idx_t> feature_indices;
+    for (const auto &col : feature_cols) {
+        auto it = column_indices.find(col);
+        if (it == column_indices.end()) {
+            throw std::runtime_error("Feature column '" + col + "' not found in result");
+        }
+        feature_indices.push_back(it->second);
+    }
+
+    // Use Fetch to iterate over chunks (more reliable)
+    auto chunk = materialized_result.Fetch();
+    idx_t global_row = 0;
+    while (chunk) {
+        idx_t rows_in_chunk = chunk->size();
+        for (idx_t local_row = 0; local_row < rows_in_chunk; local_row++) {
+            vector<float> feature_row;
+            feature_row.reserve(feature_indices.size());
+
+            // Extract features
+            for (idx_t col_idx : feature_indices) {
+                auto val = chunk->GetValue(col_idx, local_row);
+                if (val.IsNull()) {
+                    feature_row.push_back(0.0f);
+                } else {
+                    feature_row.push_back(ValueToFloat(val));
+                }
+            }
+
+            // Extract label
+            auto label_val = chunk->GetValue(target_idx, local_row);
+            if (!label_val.IsNull()) {
+                float label = ValueToFloat(label_val);
+                result.labels.push_back(label);
+                result.features.push_back(std::move(feature_row));
+                result.valid_samples++;
+            }
+            global_row++;
+        }
+        chunk = materialized_result.Fetch(); // get next chunk
+    }
+
+    std::cout << "DEBUG: Extracted " << result.valid_samples << " valid samples" << std::endl;
+    return result;
+}
+/*esql::TrainingData ExtractTrainingData(ClientContext &context,
+                                       const string &table_name,
+                                       const vector<string> &feature_cols,
+                                       const string &target_col,
+                                       const string &where_clause) {
+
+    std::cout << "DEBUG: ExtractTrainingData started" << std::endl;
+    std::cout << "DEBUG: table_name = " << table_name << std::endl;
+
+    esql::TrainingData result;
+    result.feature_names = feature_cols;
+    result.label_name = target_col;
+
+    // Build query
+    string query = "SELECT ";
+    for (size_t i = 0; i < feature_cols.size(); i++) {
+        if (i > 0) query += ", ";
+        query += feature_cols[i];
+    }
+    query += ", " + target_col + " FROM " + table_name;
+
+    if (!where_clause.empty()) {
+        query += " WHERE " + where_clause;
+    }
+
+    std::cout << "DEBUG: Executing query: " << query << std::endl;
+
+    auto &db = DatabaseInstance::GetDatabase(context);
+    Connection conn(db);
+    auto query_result = conn.Query(query);
+
+    if (!query_result || query_result->HasError()) {
+        throw std::runtime_error("Failed to execute query: " +
+                                 (query_result ? query_result->GetError() : "unknown error"));
+    }
+
+    auto &materialized_result = dynamic_cast<MaterializedQueryResult&>(*query_result);
+    std::cout << "DEBUG: Query returned " << materialized_result.RowCount() << " rows" << std::endl;
+    std::cout << "DEBUG: Column count = " << materialized_result.ColumnCount() << std::endl;
+    result.total_samples = materialized_result.RowCount();
+
+    // Print column names
+    std::cout << "DEBUG: Columns: ";
+    for (idx_t i = 0; i < materialized_result.ColumnCount(); i++) {
+        std::cout << materialized_result.names[i];
+        if (i < materialized_result.ColumnCount() - 1) std::cout << ", ";
+    }
+    std::cout << std::endl;
+
+    // Build column index map
+    std::unordered_map<string, idx_t> column_indices;
+    for (idx_t i = 0; i < materialized_result.ColumnCount(); i++) {
+        column_indices[materialized_result.names[i]] = i;
+    }
+
+    // Get target index
+    auto target_it = column_indices.find(target_col);
+    if (target_it == column_indices.end()) {
+        throw std::runtime_error("Target column '" + target_col + "' not found in result");
+    }
+    idx_t target_idx = target_it->second;
+    std::cout << "DEBUG: Target column '" << target_col << "' at index " << target_idx << std::endl;
+
+    // Get feature indices
+    vector<idx_t> feature_indices;
+    for (const auto &col : feature_cols) {
+        auto it = column_indices.find(col);
+        if (it == column_indices.end()) {
+            throw std::runtime_error("Feature column '" + col + "' not found in result");
+        }
+        feature_indices.push_back(it->second);
+        std::cout << "DEBUG: Feature column '" << col << "' at index " << it->second << std::endl;
+    }
+
+    // Validate indices
+    if (target_idx >= materialized_result.ColumnCount()) {
+        throw std::runtime_error("Target index out of range: " + std::to_string(target_idx) +
+                                 " >= " + std::to_string(materialized_result.ColumnCount()));
+    }
+    for (size_t i = 0; i < feature_indices.size(); i++) {
+        if (feature_indices[i] >= materialized_result.ColumnCount()) {
+            throw std::runtime_error("Feature index out of range for column " + feature_cols[i] +
+                                     ": " + std::to_string(feature_indices[i]) +
+                                     " >= " + std::to_string(materialized_result.ColumnCount()));
+        }
+    }
+
+    // Extract data with error handling
+    std::cout << "DEBUG: Starting extraction loop" << std::endl;
+    for (idx_t row_idx = 0; row_idx < materialized_result.RowCount(); row_idx++) {
+        std::cout << "DEBUG: Processing row " << row_idx << std::endl;
+        vector<float> feature_row;
+        feature_row.reserve(feature_indices.size());
+
+        // Extract features
+        for (size_t i = 0; i < feature_indices.size(); i++) {
+            idx_t col_idx = feature_indices[i];
+            std::cout << "DEBUG: Getting value at row " << row_idx << ", col " << col_idx << std::endl;
+
+            // Safeguard: check again
+            if (col_idx >= materialized_result.ColumnCount()) {
+                throw std::runtime_error("Column index " + std::to_string(col_idx) +
+                                         " out of range (max " + std::to_string(materialized_result.ColumnCount() - 1) + ")");
+            }
+
+            // Wrap GetValue in try-catch to capture DuckDB internal errors
+            Value val;
+            try {
+                val = materialized_result.GetValue(row_idx, col_idx);
+            } catch (const std::exception &e) {
+                std::cerr << "Exception in GetValue at row " << row_idx << ", col " << col_idx
+                          << ": " << e.what() << std::endl;
+                throw;
+            }
+
             if (val.IsNull()) {
                 feature_row.push_back(0.0f);
             } else {
@@ -173,17 +423,172 @@ esql::TrainingData ExtractTrainingData(ClientContext &context,
             }
         }
 
-        auto label_val = materialized_result.GetValue(row_idx, target_col);
+        // Extract label
+        std::cout << "DEBUG: Getting label at row " << row_idx << ", col " << target_idx << std::endl;
+        if (target_idx >= materialized_result.ColumnCount()) {
+            throw std::runtime_error("Target index " + std::to_string(target_idx) +
+                                     " out of range for row " + std::to_string(row_idx));
+        }
+
+        Value label_val;
+        try {
+            label_val = materialized_result.GetValue(row_idx, target_idx);
+        } catch (const std::exception &e) {
+            std::cerr << "Exception in GetValue (label) at row " << row_idx << ", col " << target_idx
+                      << ": " << e.what() << std::endl;
+            throw;
+        }
+
         if (!label_val.IsNull()) {
             float label = ValueToFloat(label_val);
             result.labels.push_back(label);
-            result.features.push_back(feature_row);
+            result.features.push_back(std::move(feature_row));
             result.valid_samples++;
+        } else {
+            std::cout << "DEBUG: Skipping row " << row_idx << " due to null label" << std::endl;
         }
-    }*/
+    }
 
+    std::cout << "DEBUG: Extracted " << result.valid_samples << " valid samples" << std::endl;
     return result;
-}
+}*/
+/*esql::TrainingData ExtractTrainingData(ClientContext &context,
+                                       const string &table_name,
+                                       const vector<string> &feature_cols,
+                                       const string &target_col,
+                                       const string &where_clause) {
+
+    std::cout << "DEBUG: ExtractTrainingData started" << std::endl;
+    std::cout << "DEBUG: table_name = " << table_name << std::endl;
+
+    esql::TrainingData result;
+ result.feature_names = feature_cols;
+    result.label_name = target_col;
+
+    // Build query
+    string query = "SELECT ";
+    for (size_t i = 0; i < feature_cols.size(); i++) {
+        if (i > 0) query += ", ";
+        query += feature_cols[i];
+    }
+    query += ", " + target_col + " FROM " + table_name;
+
+    if (!where_clause.empty()) {
+        query += " WHERE " + where_clause;
+    }
+
+    std::cout << "DEBUG: Executing query: " << query << std::endl;
+
+    // CRITICAL FIX: Create a new connection to avoid recursion deadlock
+    auto &db = DatabaseInstance::GetDatabase(context);
+    Connection conn(db);
+
+    // Execute query on the new connection
+    auto query_result = conn.Query(query);
+
+    if (!query_result || query_result->HasError()) {
+        throw std::runtime_error("Failed to execute query: " +
+                                 (query_result ? query_result->GetError() : "unknown error"));
+    }
+
+    // For DuckDB's MaterializedQueryResult, we need to use different methods
+    auto &materialized_result = dynamic_cast<MaterializedQueryResult&>(*query_result);
+    std::cout << "DEBUG: Query returned " << materialized_result.RowCount() << " rows" << std::endl;
+    std::cout << "DEBUG: Column count = " << materialized_result.ColumnCount() << std::endl;
+    result.total_samples = materialized_result.RowCount();
+
+    // Debug: Print column names
+    std::cout << "DEBUG: Columns: ";
+    for (idx_t i = 0; i < materialized_result.ColumnCount(); i++) {
+        std::cout << materialized_result.names[i];
+        if (i < materialized_result.ColumnCount() - 1) std::cout << ", ";
+    }
+    std::cout << std::endl;
+
+    // Get column indices
+    std::unordered_map<string, idx_t> column_indices;
+    for (idx_t i = 0; i < materialized_result.ColumnCount(); i++) {
+        column_indices[materialized_result.names[i]] = i;
+    }
+
+    // Get target column index
+    auto target_it = column_indices.find(target_col);
+    if (target_it == column_indices.end()) {
+        throw std::runtime_error("Target column '" + target_col + "' not found in result");
+    }
+    idx_t target_idx = target_it->second;
+    std::cout << "DEBUG: Target column '" << target_col << "' at index " << target_idx << std::endl;
+
+    // Get feature column indices
+    vector<idx_t> feature_indices;
+    for (const auto &col : feature_cols) {
+        auto it = column_indices.find(col);
+        if (it == column_indices.end()) {
+            throw std::runtime_error("Feature column '" + col + "' not found in result");
+        }
+        feature_indices.push_back(it->second);
+        std::cout << "DEBUG: Feature column '" << col << "' at index " << it->second << std::endl;
+    }
+
+    // Validate indices
+    if (target_idx >= materialized_result.ColumnCount()) {
+        throw std::runtime_error("Target index out of range: " + std::to_string(target_idx) +
+                                 " >= " + std::to_string(materialized_result.ColumnCount()));
+    }
+
+    for (size_t i = 0; i < feature_indices.size(); i++) {
+        if (feature_indices[i] >= materialized_result.ColumnCount()) {
+            throw std::runtime_error("Feature index out of range for column " + feature_cols[i] +
+                                     ": " + std::to_string(feature_indices[i]) +
+                                     " >= " + std::to_string(materialized_result.ColumnCount()));
+        }
+    }
+
+    // Extract data
+    for (idx_t row_idx = 0; row_idx < materialized_result.RowCount(); row_idx++) {
+        vector<float> feature_row;
+        feature_row.reserve(feature_indices.size());
+
+        // Extract features - SAFE iteration
+        for (size_t i = 0; i < feature_indices.size(); i++) {
+            idx_t col_idx = feature_indices[i];
+
+            // Bounds check
+            if (col_idx >= materialized_result.ColumnCount()) {
+                throw std::runtime_error("Attempted to access column " + std::to_string(col_idx) +
+                                         " but only " + std::to_string(materialized_result.ColumnCount()) +
+                                         " columns available at row " + std::to_string(row_idx));
+            }
+
+            auto val = materialized_result.GetValue(row_idx, col_idx);
+            if (val.IsNull()) {
+                feature_row.push_back(0.0f);
+            } else {
+                feature_row.push_back(ValueToFloat(val));
+            }
+        }
+
+        // Extract label
+        if (target_idx >= materialized_result.ColumnCount()) {
+            throw std::runtime_error("Target index " + std::to_string(target_idx) +
+                                     " out of range for row " + std::to_string(row_idx));
+        }
+
+        auto label_val = materialized_result.GetValue(row_idx, target_idx);
+        if (!label_val.IsNull()) {
+            float label = ValueToFloat(label_val);
+            result.labels.push_back(label);
+            result.features.push_back(std::move(feature_row));
+            result.valid_samples++;
+        } else {
+            std::cout << "DEBUG: Skipping row " << row_idx << " due to null label" << std::endl;
+        }
+    }
+
+    std::cout << "DEBUG: Extracted " << result.valid_samples << " valid samples" << std::endl;
+    return result;
+}*/
+
 
 // ============================================
 // Data Preprocessing
@@ -533,16 +938,27 @@ static unique_ptr<FunctionData> TrainModelBind(ClientContext &context,
                                                 TableFunctionBindInput &input,
                                                 vector<LogicalType> &return_types,
                                                 vector<string> &names) {
-
+    std::cout << "DEBUG: TrainModelBind called" << std::endl;
     auto result = make_uniq<TrainModelBindData>();
 
+	std::cout << "DEBUG: model_name = " << input.inputs[0].GetValue<string>() << std::endl;
     result->model_name = input.inputs[0].GetValue<string>();
+	std::cout << "DEBUG: algorithm = " << input.inputs[1].GetValue<string>() << std::endl;
     result->algorithm = input.inputs[1].GetValue<string>();
 
     // Parse features list
+	std::cout << "DEBUG: Parsing feature list" << std::endl;
     auto &feature_list = ListValue::GetChildren(input.inputs[2]);
+
+	    // DEBUG: Check if feature list is empty
+    if (feature_list.empty()) {
+        throw std::runtime_error("No features specified");
+    }
+
+
     for (idx_t i = 0; i < feature_list.size(); i++) {
         string feature_str = feature_list[i].GetValue<string>();
+		std::cout << "DEBUG: Feature " << i << ": " << feature_str << std::endl;
         size_t colon_pos = feature_str.find(':');
         if (colon_pos != string::npos) {
             string name = feature_str.substr(0, colon_pos);
@@ -552,6 +968,7 @@ static unique_ptr<FunctionData> TrainModelBind(ClientContext &context,
             result->features.emplace_back(feature_str, "AUTO");
         }
     }
+	std::cout << "DEBUG: Total features parsed: " << result->features.size() << std::endl;
 
     result->target_column = input.inputs[3].GetValue<string>();
 
