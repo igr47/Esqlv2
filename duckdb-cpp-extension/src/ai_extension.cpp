@@ -9,6 +9,7 @@
 #include "include/esql/model_registry.hpp"
 #include "include/esql/lightgbm_model.h"
 #include "include/esql/create_model_statement.h"
+#include "include/esql/show_models_function.hpp"
 #include <filesystem>
 
 namespace duckdb {
@@ -63,12 +64,25 @@ void AiExtensionExtension::Load(ExtensionLoader &loader) {
     );
 
     // show_models table function
-    loader.RegisterFunction(
+    /*loader.RegisterFunction(
         TableFunction("show_models", {},
             [](ClientContext &context, TableFunctionInput &data, DataChunk &output) {
                 // TODO: implement
                 output.SetCardinality(0);
             })
+    );*/
+
+	// Register show_models table function - list all models
+    loader.RegisterFunction(
+        TableFunction("show_models", {},
+            ShowModelsFunction, ShowModelsBind)
+    );
+
+	// Register show_model table function - detailed view of a single model
+    loader.RegisterFunction(
+        TableFunction("show_model",
+            {LogicalType::VARCHAR},  // model_name
+            ShowModelFunction, ShowModelBind)
     );
 
     // ========================================================================

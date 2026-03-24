@@ -219,6 +219,7 @@ set(EXTENSION_SOURCES
     src/parser_extension.cpp
     src/create_model_parser.cpp
     src/lightgbm_model_impl.cpp
+    src/show_models_function.cpp
     src/lightgbm_model_schema_impl.cpp
     src/train_model_function.cpp
     src/algorithm_registry.cpp

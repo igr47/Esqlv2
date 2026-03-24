@@ -366,20 +366,25 @@ std::optional<ModelMetadata> ModelRegistry::GetModel(ClientContext &context, con
     auto &db = DatabaseInstance::GetDatabase(context);
     Connection conn(db);
 
-    auto prepared = conn.Prepare("SELECT * FROM __model_registry WHERE model_name = ?");
-    if (prepared->HasError()) {
+    //auto prepared = conn.Prepare("SELECT * FROM __model_registry WHERE model_name = ?");
+	auto result = conn.Query("SELECT * FROM __model_registry WHERE model_name = '" + name + "'");
+	if (result->HasError()) {
         return std::nullopt;
     }
+    //if (prepared->HasError()) {
+        //return std::nullopt;
+    //}
 
-    vector<Value> values = {Value(name)};
-    auto result = prepared->Execute(values);
+    //vector<Value> values = {Value(name)};
+    //auto result = prepared->Execute(values);
 
-    if (result->HasError()) {
-        return std::nullopt;
-    }
+    //if (result->HasError()) {
+        //return std::nullopt;
+    //}
 
     // Cast to MaterializedQueryResult to access row-based methods
-    auto &materialized = dynamic_cast<MaterializedQueryResult &>(*result);
+	auto &materialized = *result;
+    //auto &materialized = dynamic_cast<MaterializedQueryResult &>(*result);
 
     if (materialized.RowCount() == 0) {
         return std::nullopt;
@@ -657,6 +662,8 @@ bool ModelRegistry::SaveModelSchema(ClientContext &context, const string &name, 
     (void)context;
     auto &instance = GetInstance();
     std::unique_lock<std::shared_mutex> lock(instance.dir_mutex_);
+    // Create directory if it doesn't exist
+    std::filesystem::create_directories(instance.models_directory_);
 
     string path = instance.GetSchemaPath(name);
     std::ofstream file(path);
@@ -666,6 +673,20 @@ bool ModelRegistry::SaveModelSchema(ClientContext &context, const string &name, 
     file << j.dump(2);
     return true;
 }
+
+/*bool ModelRegistry::SaveModelSchema(ClientContext &context, const string &name, const ModelSchema &schema) {
+    (void)context;
+    auto &instance = GetInstance();
+    std::unique_lock<std::shared_mutex> lock(instance.dir_mutex_);
+
+    string path = instance.GetSchemaPath(name);
+    std::ofstream file(path);
+    if (!file.is_open()) return false;
+
+    nlohmann::json j = SchemaToJson(schema);
+    file << j.dump(2);
+    return true;
+}*/
 
 std::optional<ModelSchema> ModelRegistry::LoadModelSchema(ClientContext &context, const string &name) {
     (void)context;
