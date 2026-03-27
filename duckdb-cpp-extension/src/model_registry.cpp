@@ -170,6 +170,17 @@ static bool TableExists(ClientContext &context, const std::string &table_name) {
 	return materialized.GetValue(0,0).GetValue<int64_t>() > 0;
 }
 
+vector<string> ModelRegistry::GetAllColumns(ClientContext &context, const string &table_name) {
+    auto &db = DatabaseInstance::GetDatabase(context);
+    Connection conn(db);
+    auto result = conn.Query("SELECT * FROM " + table_name + " LIMIT 0");
+    vector<string> columns;
+    for (idx_t i = 0; i < result->types.size(); i++) {
+        columns.push_back(result->names[i]);
+    }
+    return columns;
+}
+
 /*static bool TableExists(ClientContext &context, const string &table_name) {
     Connection conn(DatabaseInstance::GetDatabase(context));
     auto result = conn.Query("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",

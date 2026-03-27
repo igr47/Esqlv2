@@ -110,6 +110,7 @@ public:
     static std::optional<ModelMetadata> GetModel(ClientContext &context, const string &name);
     static bool ModelExists(ClientContext &context, const string &name);
     static bool DeleteModel(ClientContext &context, const string &name);
+	static vector<string> GetAllColumns(ClientContext &context, const string &table_name);
 
     static vector<string> ListModels(ClientContext &context);
     static vector<ModelMetadata> ListModelsDetailed(ClientContext &context);

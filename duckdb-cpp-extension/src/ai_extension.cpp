@@ -10,6 +10,7 @@
 #include "include/esql/lightgbm_model.h"
 #include "include/esql/create_model_statement.h"
 #include "include/esql/show_models_function.hpp"
+#include "include/esql/predict_function.hpp"
 #include <filesystem>
 
 namespace duckdb {
@@ -84,6 +85,54 @@ void AiExtensionExtension::Load(ExtensionLoader &loader) {
             {LogicalType::VARCHAR},  // model_name
             ShowModelFunction, ShowModelBind)
     );
+
+	    loader.RegisterFunction(
+        TableFunction("predict_table",
+            {
+                LogicalType::VARCHAR,  // model_name
+                LogicalType::VARCHAR,  // input_table
+                LogicalType::VARCHAR   // where_clause (optional)
+            },
+            PredictTableFunction, PredictTableBind)
+    );
+
+    // ========================================================================
+    // 7. Register scalar predict functions
+    // ========================================================================
+
+    // ai_predict - returns prediction value
+    loader.RegisterFunction(
+        ScalarFunction("ai_predict",
+            {LogicalType::VARCHAR},  // model_name
+            LogicalType::DOUBLE,
+            PredictScalarFunction)
+    );
+    // Note: We need to make this variadic - will handle in registration
+
+    // ai_predict_class - returns class label
+    loader.RegisterFunction(
+        ScalarFunction("ai_predict_class",
+            {LogicalType::VARCHAR},  // model_name
+            LogicalType::VARCHAR,
+            PredictClassFunction)
+    );
+
+    // ai_predict_proba - returns probability
+    loader.RegisterFunction(
+        ScalarFunction("ai_predict_proba",
+            {LogicalType::VARCHAR},  // model_name
+            LogicalType::DOUBLE,
+            PredictProbaFunction)
+    );
+
+    // ai_predict_probas - returns all probabilities as JSON
+    loader.RegisterFunction(
+        ScalarFunction("ai_predict_probas",
+            {LogicalType::VARCHAR},  // model_name
+            LogicalType::VARCHAR,
+            PredictProbasFunction)
+    );
+
 
     // ========================================================================
     // 2. Register scalar functions
