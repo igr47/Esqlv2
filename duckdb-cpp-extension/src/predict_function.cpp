@@ -202,6 +202,62 @@ static ModelCache& GetModelCache() {
 }
 
 // ============================================================================
+// Table Row Cache for Table‑Name Mode
+// ============================================================================
+
+struct TableRowsCache {
+    struct CachedTable {
+        vector<vector<Value>> rows;
+        vector<string> column_names;
+        size_t row_count;
+    };
+
+    unordered_map<string, CachedTable> tables;
+    std::mutex mutex;
+
+    const CachedTable& GetTable(ClientContext &context, const string &table_name) {
+        lock_guard<std::mutex> lock(mutex);
+        auto it = tables.find(table_name);
+        if (it != tables.end()) {
+            return it->second;
+        }
+
+        // Fetch entire table
+        Connection conn(DatabaseInstance::GetDatabase(context));
+        auto result = conn.Query("SELECT * FROM " + table_name);
+        if (result->HasError()) {
+            throw std::runtime_error("Failed to fetch table " + table_name + ": " + result->GetError());
+        }
+
+        auto& materialized = dynamic_cast<MaterializedQueryResult&>(*result);
+        CachedTable cached;
+        cached.row_count = materialized.RowCount();
+        cached.column_names = materialized.names;
+
+        for (idx_t row = 0; row < cached.row_count; ++row) {
+            vector<Value> row_values;
+            for (idx_t col = 0; col < materialized.ColumnCount(); ++col) {
+                row_values.push_back(materialized.GetValue(col, row));
+            }
+            cached.rows.push_back(std::move(row_values));
+        }
+
+        tables[table_name] = std::move(cached);
+        return tables[table_name];
+    }
+
+    void Clear() {
+        lock_guard<std::mutex> lock(mutex);
+        tables.clear();
+    }
+};
+
+static TableRowsCache& GetTableRowsCache() {
+    static TableRowsCache cache;
+    return cache;
+}
+
+// ============================================================================
 // Prediction Helper Functions
 // ============================================================================
 
@@ -496,7 +552,7 @@ void PredictTableFunction(ClientContext &context,
             }
         } else {
             // Regression
-            output.SetValue(output_col_offset, i, Value::DOUBLE(pred_result.prediction));
+output.SetValue(output_col_offset, i, Value::DOUBLE(pred_result.prediction));
         }
     }
 
@@ -580,199 +636,446 @@ static esql::AdaptiveLightGBMModel* GetScalarModel(ClientContext& context, const
     return cached.first.get();
 }
 
+// Main dispatcher for ai_predict
 void PredictScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-    // Arguments: model_name, feature1, feature2, ...
-    if (args.ColumnCount() < 2) {
-        throw std::runtime_error("ai_predict requires model_name and at least one feature");
+    if (args.ColumnCount() < 1) {
+        throw std::runtime_error("ai_predict requires at least model_name");
     }
 
     auto& model_name_vector = args.data[0];
     auto& context = state.GetContext();
 
-    // For simplicity, we'll process each row
+    // Determine mode: if second argument exists and is a constant string, treat as table name
+    bool use_table_name_mode = false;
+    string table_name;
+    if (args.ColumnCount() >= 2) {
+        // Check if second argument is a constant string literal
+        auto& second_arg = args.data[1];
+        if (second_arg.GetType().id() == LogicalTypeId::VARCHAR) {
+            // We need to check if it's a constant (i.e., all values are the same and it's a literal)
+            // In DuckDB, we can't easily get that here. We'll assume that if the second argument is a
+            // VARCHAR and the number of arguments is exactly 2, then it's a table name.
+            // This is a heuristic; the user must not pass a column name as a string literal.
+            if (args.ColumnCount() == 2) {
+                use_table_name_mode = true;
+                table_name = second_arg.GetValue(0).GetValue<string>();
+            }
+        }
+    }
+
     result.SetVectorType(VectorType::FLAT_VECTOR);
+    idx_t row_count = args.size();
 
-    for (idx_t i = 0; i < args.size(); i++) {
-        string model_name = model_name_vector.GetValue(i).GetValue<string>();
-
-        // Build row map from feature values
-        unordered_map<string, Value> row;
-        // We need feature names - for scalar function, we assume features are passed in order
-        // This is a limitation - better to use named parameters or require schema
-
+    if (use_table_name_mode) {
+        // Mode 2: predict from specified table
+        string model_name = model_name_vector.GetValue(0).GetValue<string>();
         auto* model = GetScalarModel(context, model_name);
         auto& schema = model->GetSchema();
 
-        if (args.ColumnCount() - 1 != schema.features.size()) {
+        // Fetch cached table rows
+        auto& table_cache = GetTableRowsCache();
+        const auto& cached_table = table_cache.GetTable(context, table_name);
+
+        // For each row, use the same row index from the cached table
+        for (idx_t i = 0; i < row_count; ++i) {
+            if (i >= cached_table.row_count) {
+                // No corresponding row in target table
+                result.SetValue(i, Value());
+                continue;
+            }
+
+            // Build row map from cached table row
+            unordered_map<string, Value> row_map;
+            for (size_t col = 0; col < cached_table.column_names.size(); ++col) {
+                row_map[cached_table.column_names[col]] = cached_table.rows[i][col];
+            }
+
+            // Extract features
+            vector<float> features;
+            for (const auto& fd : schema.features) {
+                auto it = row_map.find(fd.db_column);
+                if (it != row_map.end()) {
+                    features.push_back(fd.transform(it->second));
+                } else if (fd.required) {
+                    features.push_back(fd.default_value);
+                } else {
+                    features.push_back(fd.default_value);
+                }
+            }
+
+            esql::Tensor input(features, {features.size()});
+            auto output = model->Predict(input);
+            if (output.data.empty()) {
+                result.SetValue(i, Value());
+            } else {
+                result.SetValue(i, Value::DOUBLE(output.data[0]));
+            }
+        }
+    } else {
+        // Mode 1: predict from provided features
+        // We expect model_name + N features, where N equals the number of features in the model.
+        string model_name = model_name_vector.GetValue(0).GetValue<string>();
+        auto* model = GetScalarModel(context, model_name);
+        auto& schema = model->GetSchema();
+
+        idx_t feature_count = args.ColumnCount() - 1;
+        if (feature_count != schema.features.size()) {
             throw std::runtime_error("Expected " + std::to_string(schema.features.size()) +
-                                   " features, got " + std::to_string(args.ColumnCount() - 1));
+                                     " features, got " + std::to_string(feature_count));
         }
 
-        for (size_t f = 0; f < schema.features.size(); f++) {
-            row[schema.features[f].db_column] = args.data[f + 1].GetValue(i);
-        }
+        for (idx_t i = 0; i < row_count; ++i) {
+            unordered_map<string, Value> row_map;
+            for (size_t f = 0; f < schema.features.size(); ++f) {
+                row_map[schema.features[f].db_column] = args.data[f + 1].GetValue(i);
+            }
 
-        auto features = schema.ExtractFeatures(row);
-		esql::Tensor input(features, {features.size()});
-        auto output = model->Predict(input);
-
-        if (output.data.empty()) {
-            result.SetValue(i, Value());
-        } else {
-            result.SetValue(i, Value::DOUBLE(output.data[0]));
+            auto features = schema.ExtractFeatures(row_map);
+            esql::Tensor input(features, {features.size()});
+            auto output = model->Predict(input);
+            if (output.data.empty()) {
+                result.SetValue(i, Value());
+            } else {
+                result.SetValue(i, Value::DOUBLE(output.data[0]));
+            }
         }
     }
 }
 
+// ai_predict_class
 void PredictClassFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-    // Arguments: model_name, feature1, feature2, ...
-    if (args.ColumnCount() < 2) {
-        throw std::runtime_error("ai_predict_class requires model_name and at least one feature");
+    if (args.ColumnCount() < 1) {
+        throw std::runtime_error("ai_predict_class requires at least model_name");
     }
 
     auto& model_name_vector = args.data[0];
     auto& context = state.GetContext();
 
+    bool use_table_name_mode = false;
+    string table_name;
+    if (args.ColumnCount() >= 2) {
+        auto& second_arg = args.data[1];
+        if (second_arg.GetType().id() == LogicalTypeId::VARCHAR && args.ColumnCount() == 2) {
+            use_table_name_mode = true;
+            table_name = second_arg.GetValue(0).GetValue<string>();
+        }
+    }
+
     result.SetVectorType(VectorType::FLAT_VECTOR);
+    idx_t row_count = args.size();
 
-    for (idx_t i = 0; i < args.size(); i++) {
-        string model_name = model_name_vector.GetValue(i).GetValue<string>();
-
+    if (use_table_name_mode) {
+        string model_name = model_name_vector.GetValue(0).GetValue<string>();
         auto* model = GetScalarModel(context, model_name);
         auto& schema = model->GetSchema();
 
-        // Build row map
-        unordered_map<string, Value> row;
-        for (size_t f = 0; f < schema.features.size() && f + 1 < args.ColumnCount(); f++) {
-            row[schema.features[f].db_column] = args.data[f + 1].GetValue(i);
+        auto& table_cache = GetTableRowsCache();
+        const auto& cached_table = table_cache.GetTable(context, table_name);
+
+        for (idx_t i = 0; i < row_count; ++i) {
+            if (i >= cached_table.row_count) {
+                result.SetValue(i, Value());
+                continue;
+            }
+
+            unordered_map<string, Value> row_map;
+            for (size_t col = 0; col < cached_table.column_names.size(); ++col) {
+                row_map[cached_table.column_names[col]] = cached_table.rows[i][col];
+            }
+
+            auto features = schema.ExtractFeatures(row_map);
+            esql::Tensor input(features, {features.size()});
+            auto output = model->Predict(input);
+
+            if (output.data.empty()) {
+                result.SetValue(i, Value());
+            } else if (schema.problem_type == "binary_classification") {
+                result.SetValue(i, Value(output.data[0] > 0.5f ? "1" : "0"));
+            } else if (schema.problem_type == "multiclass") {
+                size_t class_idx = static_cast<size_t>(std::round(output.data[0]));
+                auto it = schema.metadata.find("class_labels");
+                if (it != schema.metadata.end()) {
+                    try {
+                        nlohmann::json j = nlohmann::json::parse(it->second);
+                        if (class_idx < j.size()) {
+                            result.SetValue(i, Value(j[class_idx].get<string>()));
+                            continue;
+                        }
+                    } catch (...) {}
+                }
+                result.SetValue(i, Value::INTEGER(static_cast<int64_t>(class_idx)));
+            } else {
+                result.SetValue(i, Value::DOUBLE(output.data[0]));
+            }
+        }
+    } else {
+        // Mode: features provided
+        string model_name = model_name_vector.GetValue(0).GetValue<string>();
+        auto* model = GetScalarModel(context, model_name);
+        auto& schema = model->GetSchema();
+
+        idx_t feature_count = args.ColumnCount() - 1;
+        if (feature_count != schema.features.size()) {
+            throw std::runtime_error("Expected " + std::to_string(schema.features.size()) +
+                                     " features, got " + std::to_string(feature_count));
         }
 
-        auto features = schema.ExtractFeatures(row);
-		esql::Tensor input(features, {features.size()});
-        auto output = model->Predict(input);
-
-        if (output.data.empty()) {
-            result.SetValue(i, Value());
-        } else if (schema.problem_type == "binary_classification") {
-            result.SetValue(i, Value(output.data[0] > 0.5f ? "1" : "0"));
-        } else if (schema.problem_type == "multiclass") {
-            size_t class_idx = static_cast<size_t>(std::round(output.data[0]));
-            auto it = schema.metadata.find("class_labels");
-            if (it != schema.metadata.end()) {
-                try {
-                    nlohmann::json j = nlohmann::json::parse(it->second);
-                    if (class_idx < j.size()) {
-                        result.SetValue(i, Value(j[class_idx].get<string>()));
-                        continue;
-                    }
-                } catch (...) {}
+        for (idx_t i = 0; i < row_count; ++i) {
+            unordered_map<string, Value> row_map;
+            for (size_t f = 0; f < schema.features.size(); ++f) {
+                row_map[schema.features[f].db_column] = args.data[f + 1].GetValue(i);
             }
-            result.SetValue(i, Value::INTEGER(static_cast<int64_t>(class_idx)));
-        } else {
-            result.SetValue(i, Value::DOUBLE(output.data[0]));
+
+            auto features = schema.ExtractFeatures(row_map);
+            esql::Tensor input(features, {features.size()});
+            auto output = model->Predict(input);
+
+            if (output.data.empty()) {
+                result.SetValue(i, Value());
+            } else if (schema.problem_type == "binary_classification") {
+                result.SetValue(i, Value(output.data[0] > 0.5f ? "1" : "0"));
+            } else if (schema.problem_type == "multiclass") {
+                size_t class_idx = static_cast<size_t>(std::round(output.data[0]));
+                auto it = schema.metadata.find("class_labels");
+                if (it != schema.metadata.end()) {
+                    try {
+                        nlohmann::json j = nlohmann::json::parse(it->second);
+                        if (class_idx < j.size()) {
+                            result.SetValue(i, Value(j[class_idx].get<string>()));
+                            continue;
+                        }
+                    } catch (...) {}
+                }
+                result.SetValue(i, Value::INTEGER(static_cast<int64_t>(class_idx)));
+            } else {
+                result.SetValue(i, Value::DOUBLE(output.data[0]));
+            }
         }
     }
 }
 
+// ai_predict_proba
 void PredictProbaFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-    // Arguments: model_name, feature1, feature2, ...
-    if (args.ColumnCount() < 2) {
-        throw std::runtime_error("ai_predict_proba requires model_name and at least one feature");
+    if (args.ColumnCount() < 1) {
+        throw std::runtime_error("ai_predict_proba requires at least model_name");
     }
 
     auto& model_name_vector = args.data[0];
     auto& context = state.GetContext();
 
+    bool use_table_name_mode = false;
+    string table_name;
+    if (args.ColumnCount() >= 2) {
+        auto& second_arg = args.data[1];
+        if (second_arg.GetType().id() == LogicalTypeId::VARCHAR && args.ColumnCount() == 2) {
+            use_table_name_mode = true;
+            table_name = second_arg.GetValue(0).GetValue<string>();
+        }
+    }
+
     result.SetVectorType(VectorType::FLAT_VECTOR);
+    idx_t row_count = args.size();
 
-    for (idx_t i = 0; i < args.size(); i++) {
-        string model_name = model_name_vector.GetValue(i).GetValue<string>();
-
+    if (use_table_name_mode) {
+        string model_name = model_name_vector.GetValue(0).GetValue<string>();
         auto* model = GetScalarModel(context, model_name);
         auto& schema = model->GetSchema();
 
-        // Build row map
-        unordered_map<string, Value> row;
-        for (size_t f = 0; f < schema.features.size() && f + 1 < args.ColumnCount(); f++) {
-            row[schema.features[f].db_column] = args.data[f + 1].GetValue(i);
+        auto& table_cache = GetTableRowsCache();
+        const auto& cached_table = table_cache.GetTable(context, table_name);
+
+        for (idx_t i = 0; i < row_count; ++i) {
+            if (i >= cached_table.row_count) {
+                result.SetValue(i, Value());
+                continue;
+            }
+
+            unordered_map<string, Value> row_map;
+            for (size_t col = 0; col < cached_table.column_names.size(); ++col) {
+                row_map[cached_table.column_names[col]] = cached_table.rows[i][col];
+            }
+
+            auto features = schema.ExtractFeatures(row_map);
+            esql::Tensor input(features, {features.size()});
+            auto output = model->Predict(input);
+
+            if (output.data.empty()) {
+                result.SetValue(i, Value());
+            } else if (schema.problem_type == "binary_classification") {
+                result.SetValue(i, Value::DOUBLE(output.data[0]));
+            } else if (schema.problem_type == "multiclass" && output.data.size() > 1) {
+                size_t class_idx = static_cast<size_t>(std::round(output.data[0]));
+                if (class_idx < output.data.size()) {
+                    result.SetValue(i, Value::DOUBLE(output.data[class_idx]));
+                } else {
+                    result.SetValue(i, Value::DOUBLE(0.0));
+                }
+            } else {
+                result.SetValue(i, Value::DOUBLE(output.data[0]));
+            }
+        }
+    } else {
+        string model_name = model_name_vector.GetValue(0).GetValue<string>();
+        auto* model = GetScalarModel(context, model_name);
+        auto& schema = model->GetSchema();
+
+        idx_t feature_count = args.ColumnCount() - 1;
+        if (feature_count != schema.features.size()) {
+            throw std::runtime_error("Expected " + std::to_string(schema.features.size()) +
+                                     " features, got " + std::to_string(feature_count));
         }
 
-        auto features = schema.ExtractFeatures(row);
-		esql::Tensor input(features, {features.size()});
-        auto output = model->Predict(input);
-
-        if (output.data.empty()) {
-            result.SetValue(i, Value());
-        } else if (schema.problem_type == "binary_classification") {
-            result.SetValue(i, Value::DOUBLE(output.data[0]));
-        } else if (schema.problem_type == "multiclass" && output.data.size() > 1) {
-            // Return probability for predicted class
-            size_t class_idx = static_cast<size_t>(std::round(output.data[0]));
-            if (class_idx < output.data.size()) {
-                result.SetValue(i, Value::DOUBLE(output.data[class_idx]));
-            } else {
-                result.SetValue(i, Value::DOUBLE(0.0));
+        for (idx_t i = 0; i < row_count; ++i) {
+            unordered_map<string, Value> row_map;
+            for (size_t f = 0; f < schema.features.size(); ++f) {
+                row_map[schema.features[f].db_column] = args.data[f + 1].GetValue(i);
             }
-        } else {
-            result.SetValue(i, Value::DOUBLE(output.data[0]));
+
+            auto features = schema.ExtractFeatures(row_map);
+            esql::Tensor input(features, {features.size()});
+            auto output = model->Predict(input);
+
+            if (output.data.empty()) {
+                result.SetValue(i, Value());
+            } else if (schema.problem_type == "binary_classification") {
+                result.SetValue(i, Value::DOUBLE(output.data[0]));
+            } else if (schema.problem_type == "multiclass" && output.data.size() > 1) {
+                size_t class_idx = static_cast<size_t>(std::round(output.data[0]));
+                if (class_idx < output.data.size()) {
+                    result.SetValue(i, Value::DOUBLE(output.data[class_idx]));
+                } else {
+                    result.SetValue(i, Value::DOUBLE(0.0));
+                }
+            } else {
+                result.SetValue(i, Value::DOUBLE(output.data[0]));
+            }
         }
     }
 }
 
+// ai_predict_probas
 void PredictProbasFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-    // Arguments: model_name, feature1, feature2, ...
-    if (args.ColumnCount() < 2) {
-        throw std::runtime_error("ai_predict_probas requires model_name and at least one feature");
+    if (args.ColumnCount() < 1) {
+        throw std::runtime_error("ai_predict_probas requires at least model_name");
     }
 
     auto& model_name_vector = args.data[0];
     auto& context = state.GetContext();
 
+    bool use_table_name_mode = false;
+    string table_name;
+    if (args.ColumnCount() >= 2) {
+        auto& second_arg = args.data[1];
+        if (second_arg.GetType().id() == LogicalTypeId::VARCHAR && args.ColumnCount() == 2) {
+            use_table_name_mode = true;
+            table_name = second_arg.GetValue(0).GetValue<string>();
+        }
+    }
+
     result.SetVectorType(VectorType::FLAT_VECTOR);
+    idx_t row_count = args.size();
 
-    for (idx_t i = 0; i < args.size(); i++) {
-        string model_name = model_name_vector.GetValue(i).GetValue<string>();
-
+    if (use_table_name_mode) {
+        string model_name = model_name_vector.GetValue(0).GetValue<string>();
         auto* model = GetScalarModel(context, model_name);
         auto& schema = model->GetSchema();
 
-        // Build row map
-        unordered_map<string, Value> row;
-        for (size_t f = 0; f < schema.features.size() && f + 1 < args.ColumnCount(); f++) {
-            row[schema.features[f].db_column] = args.data[f + 1].GetValue(i);
+        auto& table_cache = GetTableRowsCache();
+        const auto& cached_table = table_cache.GetTable(context, table_name);
+
+        for (idx_t i = 0; i < row_count; ++i) {
+            if (i >= cached_table.row_count) {
+                result.SetValue(i, Value());
+                continue;
+            }
+
+            unordered_map<string, Value> row_map;
+            for (size_t col = 0; col < cached_table.column_names.size(); ++col) {
+                row_map[cached_table.column_names[col]] = cached_table.rows[i][col];
+            }
+
+            auto features = schema.ExtractFeatures(row_map);
+            esql::Tensor input(features, {features.size()});
+            auto output = model->Predict(input);
+
+            if (output.data.empty()) {
+                result.SetValue(i, Value());
+            } else {
+                vector<string> class_labels;
+                auto it = schema.metadata.find("class_labels");
+                if (it != schema.metadata.end()) {
+                    try {
+                        nlohmann::json j = nlohmann::json::parse(it->second);
+                        class_labels = j.get<vector<string>>();
+                    } catch (...) {}
+                }
+
+                string json_output;
+                if (schema.problem_type == "binary_classification") {
+                    nlohmann::json j;
+                    j["0"] = 1.0 - output.data[0];
+                    j["1"] = output.data[0];
+                    json_output = j.dump();
+                } else if (output.data.size() > 1) {
+                    json_output = FormatProbabilityOutput(
+                        vector<float>(output.data.begin(), output.data.end()),
+                        class_labels);
+                } else {
+                    json_output = "{}";
+                }
+
+                result.SetValue(i, Value(json_output));
+            }
+        }
+    } else {
+        string model_name = model_name_vector.GetValue(0).GetValue<string>();
+        auto* model = GetScalarModel(context, model_name);
+        auto& schema = model->GetSchema();
+
+        idx_t feature_count = args.ColumnCount() - 1;
+        if (feature_count != schema.features.size()) {
+            throw std::runtime_error("Expected " + std::to_string(schema.features.size()) +
+                                     " features, got " + std::to_string(feature_count));
         }
 
-        auto features = schema.ExtractFeatures(row);
-		esql::Tensor input(features, {features.size()});
-        auto output = model->Predict(input);
-
-        if (output.data.empty()) {
-            result.SetValue(i, Value());
-        } else {
-            vector<string> class_labels;
-            auto it = schema.metadata.find("class_labels");
-            if (it != schema.metadata.end()) {
-                try {
-                    nlohmann::json j = nlohmann::json::parse(it->second);
-                    class_labels = j.get<vector<string>>();
-                } catch (...) {}
+        for (idx_t i = 0; i < row_count; ++i) {
+            unordered_map<string, Value> row_map;
+            for (size_t f = 0; f < schema.features.size(); ++f) {
+                row_map[schema.features[f].db_column] = args.data[f + 1].GetValue(i);
             }
 
-            string json_output;
-            if (schema.problem_type == "binary_classification") {
-                nlohmann::json j;
-                j["0"] = 1.0 - output.data[0];
-                j["1"] = output.data[0];
-                json_output = j.dump();
-            } else if (output.data.size() > 1) {
-                json_output = FormatProbabilityOutput(
-                    vector<float>(output.data.begin(), output.data.end()),
-                    class_labels);
+            auto features = schema.ExtractFeatures(row_map);
+            esql::Tensor input(features, {features.size()});
+            auto output = model->Predict(input);
+
+            if (output.data.empty()) {
+                result.SetValue(i, Value());
             } else {
-                json_output = "{}";
-            }
+                vector<string> class_labels;
+                auto it = schema.metadata.find("class_labels");
+                if (it != schema.metadata.end()) {
+                    try {
+                        nlohmann::json j = nlohmann::json::parse(it->second);
+                        class_labels = j.get<vector<string>>();
+                    } catch (...) {}
+                }
 
-            result.SetValue(i, Value(json_output));
+                string json_output;
+                if (schema.problem_type == "binary_classification") {
+                    nlohmann::json j;
+                    j["0"] = 1.0 - output.data[0];
+                    j["1"] = output.data[0];
+                    json_output = j.dump();
+                } else if (output.data.size() > 1) {
+                    json_output = FormatProbabilityOutput(
+                        vector<float>(output.data.begin(), output.data.end()),
+                        class_labels);
+                } else {
+                    json_output = "{}";
+                }
+
+                result.SetValue(i, Value(json_output));
+            }
         }
     }
 }

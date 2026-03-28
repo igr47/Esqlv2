@@ -100,39 +100,25 @@ void AiExtensionExtension::Load(ExtensionLoader &loader) {
     // 7. Register scalar predict functions
     // ========================================================================
 
-    // ai_predict - returns prediction value
-    loader.RegisterFunction(
-        ScalarFunction("ai_predict",
-            {LogicalType::VARCHAR},  // model_name
-            LogicalType::DOUBLE,
-            PredictScalarFunction)
-    );
-    // Note: We need to make this variadic - will handle in registration
+	// ai_predict - variadic
+	ScalarFunction predict_func("ai_predict", {LogicalType::VARCHAR}, LogicalType::DOUBLE, PredictScalarFunction);
+	predict_func.varargs = LogicalType::ANY;
+	loader.RegisterFunction(predict_func);
 
-    // ai_predict_class - returns class label
-    loader.RegisterFunction(
-        ScalarFunction("ai_predict_class",
-            {LogicalType::VARCHAR},  // model_name
-            LogicalType::VARCHAR,
-            PredictClassFunction)
-    );
+	// ai_predict_class - variadic
+	ScalarFunction predict_class_func("ai_predict_class", {LogicalType::VARCHAR}, LogicalType::VARCHAR, PredictClassFunction);
+	predict_class_func.varargs = LogicalType::ANY;
+	loader.RegisterFunction(predict_class_func);
 
-    // ai_predict_proba - returns probability
-    loader.RegisterFunction(
-        ScalarFunction("ai_predict_proba",
-            {LogicalType::VARCHAR},  // model_name
-            LogicalType::DOUBLE,
-            PredictProbaFunction)
-    );
+	// ai_predict_proba - variadic
+	ScalarFunction predict_proba_func("ai_predict_proba", {LogicalType::VARCHAR}, LogicalType::DOUBLE, PredictProbaFunction);
+	predict_proba_func.varargs = LogicalType::ANY;
+	loader.RegisterFunction(predict_proba_func);
 
-    // ai_predict_probas - returns all probabilities as JSON
-    loader.RegisterFunction(
-        ScalarFunction("ai_predict_probas",
-            {LogicalType::VARCHAR},  // model_name
-            LogicalType::VARCHAR,
-            PredictProbasFunction)
-    );
-
+	// ai_predict_probas - variadic
+	ScalarFunction predict_probas_func("ai_predict_probas", {LogicalType::VARCHAR}, LogicalType::VARCHAR, PredictProbasFunction);
+	predict_probas_func.varargs = LogicalType::ANY;
+	loader.RegisterFunction(predict_probas_func);
 
     // ========================================================================
     // 2. Register scalar functions
