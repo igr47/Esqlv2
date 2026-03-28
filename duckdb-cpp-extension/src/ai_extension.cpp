@@ -206,11 +206,24 @@ void AiExtensionExtension::Load(ExtensionLoader &loader) {
 
         // Build parameters map (as a MAP(VARCHAR, VARCHAR))
         vector<Value> param_keys, param_values;
+		unordered_set<string> added_keys;
 
-        auto add_param = [&](const string &key, const string &value) {
+        /*auto add_param = [&](const string &key, const string &value) {
             param_keys.emplace_back(key);
             param_values.emplace_back(value);
-        };
+        };*/
+
+		auto add_param = [&](const string &key, const string &value) {
+			//string upper_key = toupper(key);
+			if (added_keys.find(key) == added_keys.end()) {
+        		added_keys.insert(key);
+        		param_keys.emplace_back(key);
+        		param_values.emplace_back(value);
+        		std::cout << "DEBUG: Added param from "  << ": " << key << " = " << value << std::endl;
+    		} else {
+        		std::cout << "DEBUG: Skipping duplicate param from " << ": " << key << " (already added)" << std::endl;
+    		}
+		};
 
         // User parameters
         for (const auto &p : stmt.parameters) {
