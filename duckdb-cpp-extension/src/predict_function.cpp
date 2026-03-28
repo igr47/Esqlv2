@@ -24,6 +24,18 @@ static string ToUpper(const string &s) {
     return result;
 }
 
+static string GetFromTableName(ClientContext& context) {
+    // Get the current query text
+    string query = context.GetCurrentQuery();
+    // Find the first table name after FROM (case‑insensitive)
+    std::regex from_regex(R"(FROM\s+([a-zA-Z_][a-zA-Z0-9_]*))", std::regex::icase);
+    std::smatch match;
+    if (std::regex_search(query, match, from_regex)) {
+        return match[1].str();
+    }
+    return "";
+}
+
 static float ValueToFloat(const Value &val) {
     if (val.IsNull()) return 0.0f;
 
@@ -637,7 +649,115 @@ static esql::AdaptiveLightGBMModel* GetScalarModel(ClientContext& context, const
 }
 
 // Main dispatcher for ai_predict
+// Main dispatcher for ai_predict
 void PredictScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    if (args.ColumnCount() < 1) {
+        throw std::runtime_error("ai_predict requires at least model_name");
+    }
+
+    auto& model_name_vector = args.data[0];
+    auto& context = state.GetContext();
+
+    // Determine mode:
+    // - 1 argument -> use FROM table
+    // - 2 arguments and second is VARCHAR -> use that table
+    // - >2 arguments -> use provided features
+    bool use_table_name_mode = false;
+    string table_name;
+
+    if (args.ColumnCount() == 1) {
+        // Only model name provided: use the table from the FROM clause
+        table_name = GetFromTableName(context);
+        if (table_name.empty()) {
+            throw std::runtime_error("Could not determine FROM table for ai_predict. Please provide table name as second argument.");
+        }
+        use_table_name_mode = true;
+    } else if (args.ColumnCount() == 2 && args.data[1].GetType().id() == LogicalTypeId::VARCHAR) {
+        // Two arguments and second is string literal: treat as table name
+        use_table_name_mode = true;
+        table_name = args.data[1].GetValue(0).GetValue<string>();
+    } else {
+        use_table_name_mode = false;
+    }
+
+    result.SetVectorType(VectorType::FLAT_VECTOR);
+    idx_t row_count = args.size();
+
+    if (use_table_name_mode) {
+        // Predict from specified table
+        string model_name = model_name_vector.GetValue(0).GetValue<string>();
+        auto* model = GetScalarModel(context, model_name);
+        auto& schema = model->GetSchema();
+
+        // Fetch cached table rows
+        auto& table_cache = GetTableRowsCache();
+        const auto& cached_table = table_cache.GetTable(context, table_name);
+
+        // For each row, use the same row index from the cached table
+        for (idx_t i = 0; i < row_count; ++i) {
+            if (i >= cached_table.row_count) {
+                // No corresponding row in target table
+                result.SetValue(i, Value());
+                continue;
+            }
+
+            // Build row map from cached table row
+            unordered_map<string, Value> row_map;
+            for (size_t col = 0; col < cached_table.column_names.size(); ++col) {
+                row_map[cached_table.column_names[col]] = cached_table.rows[i][col];
+            }
+
+            // Extract features
+            vector<float> features;
+            for (const auto& fd : schema.features) {
+                auto it = row_map.find(fd.db_column);
+                if (it != row_map.end()) {
+                    features.push_back(fd.transform(it->second));
+                } else if (fd.required) {
+                    features.push_back(fd.default_value);
+                } else {
+                    features.push_back(fd.default_value);
+                }
+            }
+
+            esql::Tensor input(features, {features.size()});
+            auto output = model->Predict(input);
+            if (output.data.empty()) {
+                result.SetValue(i, Value());
+            } else {
+                result.SetValue(i, Value::DOUBLE(output.data[0]));
+            }
+        }
+    } else {
+        // Predict from provided features
+        string model_name = model_name_vector.GetValue(0).GetValue<string>();
+        auto* model = GetScalarModel(context, model_name);
+        auto& schema = model->GetSchema();
+
+        idx_t feature_count = args.ColumnCount() - 1;
+        if (feature_count != schema.features.size()) {
+            throw std::runtime_error("Expected " + std::to_string(schema.features.size()) +
+                                     " features, got " + std::to_string(feature_count));
+        }
+
+        for (idx_t i = 0; i < row_count; ++i) {
+            unordered_map<string, Value> row_map;
+            for (size_t f = 0; f < schema.features.size(); ++f) {
+                row_map[schema.features[f].db_column] = args.data[f + 1].GetValue(i);
+            }
+
+            auto features = schema.ExtractFeatures(row_map);
+            esql::Tensor input(features, {features.size()});
+            auto output = model->Predict(input);
+            if (output.data.empty()) {
+                result.SetValue(i, Value());
+            } else {
+                result.SetValue(i, Value::DOUBLE(output.data[0]));
+            }
+        }
+    }
+}
+/*void PredictScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
     if (args.ColumnCount() < 1) {
         throw std::runtime_error("ai_predict requires at least model_name");
     }
@@ -740,7 +860,7 @@ void PredictScalarFunction(DataChunk &args, ExpressionState &state, Vector &resu
             }
         }
     }
-}
+}*/
 
 // ai_predict_class
 void PredictClassFunction(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -1083,6 +1203,18 @@ void PredictProbasFunction(DataChunk &args, ExpressionState &state, Vector &resu
 // ============================================================================
 // Parser Extension for PREDICT Statement
 // ============================================================================
+
+/*static string GetFromTableName(ClientContext& context) {
+    // Get the current query text
+    string query = context.GetCurrentQuery();
+    // Find the first table name after FROM (case‑insensitive)
+    std::regex from_regex(R"(FROM\s+([a-zA-Z_][a-zA-Z0-9_]*))", std::regex::icase);
+    std::smatch match;
+    if (std::regex_search(query, match, from_regex)) {
+        return match[1].str();
+    }
+    return "";
+}*/
 
 bool IsPredictStatement(const string &query) {
     std::regex pattern(R"(^\s*(PREDICT|INFER)\s+USING\s+[a-zA-Z_][a-zA-Z0-9_]*\s+ON\s+[a-zA-Z_][a-zA-Z0-9_]*)",
