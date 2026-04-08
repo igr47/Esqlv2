@@ -1,4 +1,5 @@
 #include "include/esql/lightgbm_model.h"
+#include "include/esql/hyperparameter_tuning.hpp"
 #include "duckdb.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/types/timestamp.hpp"
@@ -1286,9 +1287,53 @@ static void TrainModelFunction(ClientContext &context,
 
     // Step 7: Apply hyperparameter tuning if requested
     if (data.tuning_options.tune_hyperparameters) {
-        auto tuned_params = TuneHyperparameters(processed_data, data.algorithm, problem_type,
-                                                data.tuning_options, feature_descriptors,
-                                                data.training_options.seed);
+		    std::cout << "\n[Training] Starting hyperparameter tuning..." << std::endl;
+
+    	std::unordered_map<std::string, std::string> tuned_params;
+
+    	if (data.tuning_options.tuning_method == "grid" ||
+        	data.tuning_options.tuning_method == "GRID") {
+
+			GridSearchCV grid_search(
+				processed_data,
+				data.algorithm,
+				problem_type,
+				data.tuning_options,
+				feature_descriptors,
+				data.training_options.seed
+			);
+
+			tuned_params = grid_search.Fit();
+
+		} else if (data.tuning_options.tuning_method == "random" ||
+				   data.tuning_options.tuning_method == "RANDOM") {
+
+			RandomizedSearchCV random_search(
+				processed_data,
+				data.algorithm,
+				problem_type,
+				data.tuning_options,
+				feature_descriptors,
+				data.training_options.seed
+			);
+
+			tuned_params = random_search.Fit();
+
+		} else if (data.tuning_options.tuning_method == "bayesian") {
+			// Bayesian optimization would go here
+			std::cout << "[Training] Bayesian optimization not yet implemented, using grid search" << std::endl;
+
+			GridSearchCV grid_search(
+				processed_data,
+				data.algorithm,
+				problem_type,
+				data.tuning_options,
+				feature_descriptors,
+				data.training_options.seed
+			);
+
+			tuned_params = grid_search.Fit();
+		}
 
         for (const auto &[key, value] : tuned_params) {
             if (train_params.find(key) == train_params.end()) {
